@@ -33,7 +33,7 @@ function buildLedger(data) {
     (a, b) => a.datetime.localeCompare(b.datetime) || (a.createdAt || 0) - (b.createdAt || 0)
   );
   const bal = {};
-  data.accounts.forEach((a) => (bal[a.id] = 0));
+  data.accounts.forEach((a) => (bal[a.id] = round2(Number(a.opening) || 0)));
   const rows = sorted.map((t) => {
     const r = { ...t };
     if (t.type === 'credit') bal[t.accountId] = round2(bal[t.accountId] + t.amount);
@@ -52,6 +52,7 @@ function buildLedger(data) {
 export default function Dashboard({ mode }) {
   const [data, setData] = useState(null);
   const [isAdmin, setIsAdmin] = useState(false);
+  const [me, setMe] = useState(null);
   const [error, setError] = useState('');
   const [online, setOnline] = useState(true);
   const [needLogin, setNeedLogin] = useState(false);
@@ -59,18 +60,23 @@ export default function Dashboard({ mode }) {
   const viewKey = useRef('');
 
   const load = useCallback(async () => {
-    if (busy.current) return;
+    if (busy.current || document.visibilityState === 'hidden') return;
     try {
       const q = viewKey.current ? `?key=${encodeURIComponent(viewKey.current)}` : '';
       const res = await fetch('/api/data' + q, { cache: 'no-store' });
       const json = await res.json();
       if (!res.ok) {
+        if (mode === 'admin' && res.status === 401) {
+          setNeedLogin(true);
+          return;
+        }
         setError(json.error || 'Could not load');
         setOnline(false);
         return;
       }
       setData(json.data);
       setIsAdmin(json.isAdmin);
+      setMe(json.me || null);
       setNeedLogin(mode === 'admin' && !json.isAdmin);
       setError('');
       setOnline(true);
@@ -129,36 +135,74 @@ export default function Dashboard({ mode }) {
   }
   if (!data) return <div className="wrap"><p className="sub">Loading…</p></div>;
 
-  return <Main data={data} canEdit={mode === 'admin' && isAdmin} online={online} act={act} onLogout={logout} viewKey={viewKey.current} />;
+  return <Main data={data} canEdit={mode === 'admin' && isAdmin} online={online} act={act} onLogout={logout} viewKey={viewKey.current} me={me} reload={load} />;
+}
+
+function Bal({ v }) {
+  return <span style={v < 0 ? { color: 'var(--debit)' } : undefined}>{inr(v)}</span>;
 }
 
 function Login({ onDone }) {
+  const [signup, setSignup] = useState(false);
+  const [username, setUsername] = useState('');
   const [pw, setPw] = useState('');
+  const [code, setCode] = useState('');
+  const [inviteOnly, setInviteOnly] = useState(false);
   const [err, setErr] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    fetch('/api/login').then((r) => r.json()).then((j) => setInviteOnly(!!j.inviteOnly)).catch(() => {});
+  }, []);
+
   async function submit(e) {
     e.preventDefault();
-    const res = await fetch('/api/login', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ password: pw }),
-    });
-    if (res.ok) onDone();
-    else setErr('Wrong password. Try again.');
+    setBusy(true);
+    setErr('');
+    try {
+      const res = await fetch('/api/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode: signup ? 'signup' : 'login', username, password: pw, code }),
+      });
+      const json = await res.json().catch(() => ({}));
+      if (res.ok) onDone();
+      else setErr(json.error || 'Something went wrong');
+    } catch {
+      setErr('Network problem — try again');
+    } finally {
+      setBusy(false);
+    }
   }
+
   return (
     <form className="login" onSubmit={submit}>
       <h1>Ledger</h1>
+      <p className="sub" style={{ margin: 0 }}>{signup ? 'Create your own private ledger.' : 'Log in to your ledger.'}</p>
+      <div className="field">
+        <label htmlFor="un">Username</label>
+        <input id="un" className="in" value={username} onChange={(e) => setUsername(e.target.value)} autoComplete="username" autoCapitalize="none" autoFocus />
+      </div>
       <div className="field">
         <label htmlFor="pw">Password</label>
-        <input id="pw" className="in" type="password" value={pw} onChange={(e) => setPw(e.target.value)} autoFocus />
+        <input id="pw" className="in" type="password" value={pw} onChange={(e) => setPw(e.target.value)} autoComplete={signup ? 'new-password' : 'current-password'} />
       </div>
-      {err && <div className="msg err">{err}</div>}
-      <button className="btn primary" type="submit">Log in</button>
+      {signup && inviteOnly && (
+        <div className="field">
+          <label htmlFor="ic">Invite code</label>
+          <input id="ic" className="in" value={code} onChange={(e) => setCode(e.target.value)} />
+        </div>
+      )}
+      {err && <div className="msg err" role="alert">{err}</div>}
+      <button className="btn primary" type="submit" disabled={busy}>{busy ? 'Please wait…' : signup ? 'Create account' : 'Log in'}</button>
+      <button className="btn small" type="button" onClick={() => { setSignup(!signup); setErr(''); }}>
+        {signup ? 'I already have an account' : 'New here? Create an account'}
+      </button>
     </form>
   );
 }
 
-function Main({ data, canEdit, online, act, onLogout, viewKey }) {
+function Main({ data, canEdit, online, act, onLogout, viewKey, me, reload }) {
   const { rows, balances } = useMemo(() => buildLedger(data), [data]);
   const accName = useMemo(() => Object.fromEntries(data.accounts.map((a) => [a.id, a.name])), [data]);
   const total = round2(Object.values(balances).reduce((s, v) => s + v, 0));
@@ -222,7 +266,7 @@ function Main({ data, canEdit, online, act, onLogout, viewKey }) {
 
     autoTable(doc, {
       startY: 36,
-      head: [['Date', 'Time', 'Account', 'Type', 'Category', 'Description', 'Amount', 'Balance after']],
+      head: [['Date', 'Time', 'Account', 'Type', 'Category', 'Description', 'Amount', 'Balance left']],
       body,
       styles: { fontSize: 9, cellPadding: 2.5 },
       headStyles: { fillColor: [22, 32, 51] },
@@ -238,7 +282,8 @@ function Main({ data, canEdit, online, act, onLogout, viewKey }) {
 
   const [copied, setCopied] = useState(false);
   function copyViewLink() {
-    const url = `${window.location.origin}/view${viewKey ? `?key=${viewKey}` : ''}`;
+    const k = me?.viewKey || viewKey;
+    const url = `${window.location.origin}/view${k ? `?key=${k}` : ''}`;
     navigator.clipboard?.writeText(url);
     setCopied(true);
     setTimeout(() => setCopied(false), 1800);
@@ -253,10 +298,25 @@ function Main({ data, canEdit, online, act, onLogout, viewKey }) {
             <span className={'dot' + (online ? '' : ' off')} />
             {online ? 'Live' : 'Reconnecting…'}
           </span>
+          {me && <span className="sub">· {me.username}</span>}
         </div>
         <div className="actions">
+          <a className="btn" href={'/categories' + (viewKey ? `?key=${encodeURIComponent(viewKey)}` : '')}>Categories</a>
           <button className="btn" onClick={exportPdf} disabled={!filtered.length}>Export PDF</button>
           {canEdit && <button className="btn" onClick={copyViewLink}>{copied ? 'Copied' : 'Copy parents’ link'}</button>}
+          {canEdit && (
+            <button
+              className="btn"
+              onClick={async () => {
+                if (!confirm('Make a new parents’ link? The old link will stop working.')) return;
+                const r = await act('resetViewKey');
+                if (r.error) alert(r.error);
+                else reload();
+              }}
+            >
+              New link
+            </button>
+          )}
           {canEdit && <button className="btn" onClick={onLogout}>Log out</button>}
         </div>
       </header>
@@ -277,14 +337,28 @@ function Main({ data, canEdit, online, act, onLogout, viewKey }) {
                 <span className="name">{a.name}</span>
                 <span className={'bal num' + (balances[a.id] < 0 ? ' neg' : '')}>{inr(balances[a.id] || 0)}</span>
                 {canEdit ? (
-                  <button
-                    className="btn small danger"
-                    onClick={() => {
-                      if (confirm(`Delete "${a.name}" and every transaction that involves it?`)) act('deleteAccount', { id: a.id });
-                    }}
-                  >
-                    Delete
-                  </button>
+                  <div style={{ display: 'flex', gap: 6 }}>
+                    <button
+                      className="btn small"
+                      title="Set what this account held before your first recorded transaction"
+                      onClick={async () => {
+                        const v = prompt(`How much did "${a.name}" hold before your first recorded transaction? (₹)`, String(a.opening || 0));
+                        if (v === null) return;
+                        const r = await act('setOpening', { id: a.id, opening: v });
+                        if (r.error) alert(r.error);
+                      }}
+                    >
+                      Set start
+                    </button>
+                    <button
+                      className="btn small danger"
+                      onClick={() => {
+                        if (confirm(`Delete "${a.name}" and every transaction that involves it?`)) act('deleteAccount', { id: a.id });
+                      }}
+                    >
+                      Delete
+                    </button>
+                  </div>
                 ) : <span />}
               </div>
             ))}
@@ -292,6 +366,12 @@ function Main({ data, canEdit, online, act, onLogout, viewKey }) {
           {canEdit && <AddAccount act={act} />}
         </div>
       </section>
+
+      {canEdit && data.accounts.some((a) => !a.opening && (balances[a.id] || 0) < 0) && (
+        <p className="msg err" style={{ margin: '-8px 0 20px' }}>
+          An account is showing a negative balance because it started at ₹0. Tap <b>Set start</b> next to it and enter what it held before your first entry, or record an <b>Add money</b> entry.
+        </p>
+      )}
 
       {canEdit && data.accounts.length > 0 && <EntryForm data={data} act={act} />}
 
@@ -328,7 +408,7 @@ function Main({ data, canEdit, online, act, onLogout, viewKey }) {
               <thead>
                 <tr>
                   <th>When</th><th>Account</th><th>Category</th><th>Description</th>
-                  <th className="r">Amount</th><th className="r">Balance after</th>{canEdit && <th />}
+                  <th className="r">Amount</th><th className="r">Balance left</th>{canEdit && <th />}
                 </tr>
               </thead>
               <tbody>
@@ -342,16 +422,25 @@ function Main({ data, canEdit, online, act, onLogout, viewKey }) {
                       </td>
                       <td>
                         {r.type === 'transfer' ? `${accName[r.accountId]} → ${accName[r.toAccountId]}` : accName[r.accountId]}
-                        {r.type === 'transfer' && fAcc === 'all' && (
-                          <div className="sub num">{accName[r.toAccountId]}: {inr(r.toBalance)}</div>
-                        )}
                       </td>
                       <td><span className="pill">{r.category}</span></td>
                       <td>{r.description || <span className="sub">—</span>}</td>
                       <td className={'r num amt ' + r.type} style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
                         {sign}{inr(r.amount).replace('-', '')}
                       </td>
-                      <td className="num" style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>{inr(balFor(r))}</td>
+                      <td className="num" style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
+                        {r.type === 'transfer' && fAcc === 'all' ? (
+                          <>
+                            <div><Bal v={r.balance} /><div className="sub">{accName[r.accountId]}</div></div>
+                            <div style={{ marginTop: 6 }}><Bal v={r.toBalance} /><div className="sub">{accName[r.toAccountId]}</div></div>
+                          </>
+                        ) : (
+                          <>
+                            <Bal v={balFor(r)} />
+                            <div className="sub">{accName[isTo ? r.toAccountId : r.accountId]}</div>
+                          </>
+                        )}
+                      </td>
                       {canEdit && (
                         <td style={{ textAlign: 'right' }}>
                           <button

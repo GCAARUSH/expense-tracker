@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { getData, saveData, isAdmin } from '../../../lib/store';
+import { redis, getData, saveData, getUser, newViewKey, readSession, resolveViewer } from '../../../lib/store';
 import { randomUUID } from 'crypto';
 
 export const dynamic = 'force-dynamic';
@@ -8,22 +8,32 @@ const round2 = (n) => Math.round(n * 100) / 100;
 const noStore = { headers: { 'Cache-Control': 'no-store' } };
 
 export async function GET(req) {
-  const admin = isAdmin(req);
-  const viewKey = process.env.VIEW_KEY;
-  const key = new URL(req.url).searchParams.get('key');
-  if (!admin && viewKey && key !== viewKey) {
-    return NextResponse.json({ error: 'Invalid view link' }, { status: 401, ...noStore });
+  const v = await resolveViewer(req);
+  if (!v) {
+    return NextResponse.json({ error: 'Not logged in, or the link is invalid' }, { status: 401, ...noStore });
   }
-  const data = await getData();
-  return NextResponse.json({ data, isAdmin: admin }, noStore);
+  if (v.admin) {
+    const [user, data] = await redis.mget(`et:user:${v.username}`, `et:data:${v.username}`);
+    if (!user) return NextResponse.json({ error: 'Account not found' }, { status: 401, ...noStore });
+    return NextResponse.json(
+      {
+        data: data && data.accounts ? data : { accounts: [], transactions: [] },
+        isAdmin: true,
+        me: { username: v.username, viewKey: user.viewKey },
+      },
+      noStore
+    );
+  }
+  const data = await getData(v.username);
+  return NextResponse.json({ data, isAdmin: false, me: null }, noStore);
 }
 
 export async function POST(req) {
-  if (!isAdmin(req)) {
-    return NextResponse.json({ error: 'Not logged in' }, { status: 401 });
-  }
+  const username = readSession(req);
+  if (!username) return NextResponse.json({ error: 'Not logged in' }, { status: 401 });
+
   const { action, payload = {} } = await req.json().catch(() => ({}));
-  const data = await getData();
+  const data = await getData(username);
   const now = Date.now();
   let newId = null;
 
@@ -36,23 +46,17 @@ export async function POST(req) {
       if (!name) return bad('Account name is required');
       if (data.accounts.some((a) => a.name.toLowerCase() === name.toLowerCase()))
         return bad('An account with that name already exists');
-      const acc = { id: randomUUID(), name };
-      data.accounts.push(acc);
       const opening = round2(Number(payload.opening) || 0);
-      if (opening > 0) {
-        const d = new Date();
-        const pad = (n) => String(n).padStart(2, '0');
-        data.transactions.push({
-          id: randomUUID(),
-          type: 'credit',
-          accountId: acc.id,
-          amount: opening,
-          category: 'Opening balance',
-          description: 'Opening balance',
-          datetime: `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`,
-          createdAt: now,
-        });
-      }
+      data.accounts.push({ id: randomUUID(), name, opening });
+      break;
+    }
+
+    case 'setOpening': {
+      const acc = data.accounts.find((x) => x.id === payload.id);
+      if (!acc) return bad('Account not found');
+      const v = Number(payload.opening);
+      if (!Number.isFinite(v)) return bad('Enter a valid amount');
+      acc.opening = round2(v);
       break;
     }
 
@@ -99,10 +103,21 @@ export async function POST(req) {
       break;
     }
 
+    case 'resetViewKey': {
+      const user = await getUser(username);
+      if (!user) return bad('Account not found');
+      const old = user.viewKey;
+      user.viewKey = newViewKey();
+      await redis.set(`et:user:${username}`, user);
+      await redis.set(`et:viewkey:${user.viewKey}`, username);
+      if (old) await redis.del(`et:viewkey:${old}`);
+      return NextResponse.json({ data, viewKey: user.viewKey });
+    }
+
     default:
       return bad('Unknown action');
   }
 
-  await saveData(data);
+  await saveData(username, data);
   return NextResponse.json({ data, id: newId });
 }

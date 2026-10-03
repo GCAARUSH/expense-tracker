@@ -1,33 +1,30 @@
-# Ledger — expense tracker (Next.js + Vercel)
+# Ledger — multi-user expense tracker (Next.js + Vercel)
 
-Multiple accounts, expenses, credits, transfers, running balance after every
-transaction, PDF export, dark theme, and a read-only live page for your parents.
+Each person creates an account and gets a private ledger: multiple accounts,
+expenses, credits, transfers, balance left after every transaction, a category
+breakdown, PDF export, and a read-only live link for their family.
 
 ## Pages
-- `/`      — you. Password protected. Add/delete accounts and transactions.
-- `/view`  — parents. Read-only, refreshes every 5 seconds. PDF export works here too.
+- `/`            — log in / sign up, then manage your ledger
+- `/categories`  — spending (or money added) by category
+- `/view?key=…`  — read-only live view for parents; each user has their own link
 
-## Deploy (about 5 minutes)
-1. Push this folder to a GitHub repo.
-2. On vercel.com: **Add New → Project →** import the repo → Deploy.
-3. In the project: **Storage → Create → Upstash Redis** (free tier) → connect it
-   to the project. This adds `KV_REST_API_URL` and `KV_REST_API_TOKEN` for you.
-4. In **Settings → Environment Variables** add:
-   - `ADMIN_PASSWORD` = a long password only you know
-   - `VIEW_KEY` = a random string (optional but recommended)
-5. **Redeploy** (Deployments → ⋯ → Redeploy) so the variables take effect.
-6. Open your site, log in, then tap **Copy parents' link** and send it to them.
-   The link looks like `https://your-app.vercel.app/view?key=YOUR_VIEW_KEY`.
+## Environment variables (Vercel → Settings → Environment Variables)
+| Name | Required | Purpose |
+|---|---|---|
+| `KV_REST_API_URL`, `KV_REST_API_TOKEN` | yes | Added by connecting Upstash Redis under Storage |
+| `SESSION_SECRET` | recommended | Long random string that signs login cookies (falls back to `ADMIN_PASSWORD`) |
+| `SIGNUP_CODE` | recommended | If set, new users must enter it to sign up (invite-only) |
 
-## Run locally
-```
-npm install
-cp .env.example .env.local   # fill in the values
-npm run dev
-```
+After changing variables, redeploy.
+
+## Upgrading from the single-user version
+Deploy, open the site, and **create your account first**. The first account ever
+created inherits the data from the old version. Your old parents' link stops
+working; use **Copy parents' link** to get your new one.
 
 ## Notes
-- Balances are never stored; they're recalculated from the transaction history, so
-  deleting or back-dating a transaction keeps everything consistent.
-- PDF uses "Rs." instead of ₹ because the built-in PDF font has no rupee glyph.
-- Overdrafts are allowed (balance just shows in red) so a missed entry never blocks you.
+- Passwords are hashed (scrypt). Each user can only see their own data.
+- The app owner can still see everything in the Upstash database — tell your users.
+- The live view refreshes every 5 seconds, only while the tab is open and visible.
+- The PDF uses "Rs." because the built-in PDF font has no ₹ glyph.
